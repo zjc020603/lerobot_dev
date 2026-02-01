@@ -53,6 +53,7 @@ DEFAULT_VIDEO_FILE_SIZE_IN_MB = 200  # Max size per file
 
 INFO_PATH = "meta/info.json"
 STATS_PATH = "meta/stats.json"
+ADVANTAGES_PATH = "meta/advantages.json"
 
 EPISODES_DIR = "meta/episodes"
 DATA_DIR = "data"
@@ -340,6 +341,19 @@ def load_stats(local_dir: Path) -> dict[str, dict[str, np.ndarray]] | None:
         return None
     stats = load_json(local_dir / STATS_PATH)
     return cast_stats_to_numpy(stats)
+
+
+def load_advantages(local_dir: Path) -> dict[tuple[int, float], float] | None:
+    """Load advantage sidecar file if present.
+
+    The file maps "{episode_index},{timestamp}" -> advantage scalar.
+    """
+    path = local_dir / ADVANTAGES_PATH
+    if not path.exists():
+        return None
+    with open(path, "r") as f:
+        advantages = json.load(f)
+    return {(int(k.split(",")[0]), float(k.split(",")[1])): v for k, v in advantages.items()}
 
 
 def write_tasks(tasks: pandas.DataFrame, local_dir: Path) -> None:

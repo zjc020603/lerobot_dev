@@ -53,6 +53,7 @@ from lerobot.datasets.utils import (
     get_safe_version,
     hf_transform_to_torch,
     is_valid_version,
+    load_advantages,
     load_episodes,
     load_info,
     load_nested_dataset,
@@ -76,6 +77,7 @@ from lerobot.datasets.video_utils import (
     get_video_info,
 )
 from lerobot.utils.constants import HF_LEROBOT_HOME
+from lerobot.datasets.reward import calculate_return_bins_with_equal_width
 
 CODEBASE_VERSION = "v3.0"
 VALID_VIDEO_CODECS = {"h264", "hevc", "libsvtav1"}
@@ -567,6 +569,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         video_backend: str | None = None,
         batch_encoding_size: int = 1,
         vcodec: str = "libsvtav1",
+        policy_cfg=None,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -712,6 +715,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.meta = LeRobotDatasetMetadata(
             self.repo_id, self.root, self.revision, force_cache_sync=force_cache_sync
         )
+
+        self.policy_cfg = policy_cfg
+
+        # Optional advantage sidecar
+        self.advantages = load_advantages(self.root)
 
         # Track dataset state for efficient incremental writing
         self._lazy_loading = False
@@ -1075,6 +1083,49 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Add task as a string
         task_idx = item["task_index"].item()
         item["task"] = self.meta.tasks.iloc[task_idx].name
+
+        # Add advantage from sidecar if available
+        if self.advantages is not None:
+            timestamp = item.get("timestamp")
+            if isinstance(timestamp, torch.Tensor):
+                timestamp = timestamp.item()
+            adv_key = (int(ep_idx), float(timestamp))
+            adv_value = self.advantages.get(adv_key, 0.0)
+            item["advantage"] = torch.tensor(adv_value, dtype=torch.float32)
+
+        #注：这里暂时还没有加入对advantage的处理
+
+        # only add the below fields to item when training or evaluating the value fns
+        if self.policy_cfg is not None and getattr(self.policy_cfg, "type", None) == "value":
+            ep = self.meta.episodes[ep_idx]
+
+            if "dataset_to_index" in ep:
+                episode_end_idx = ep["dataset_to_index"] - 1
+            elif "dataset_from_index" in ep and "length" in ep:
+                episode_end_idx = ep["dataset_from_index"] + ep["length"] - 1
+            else:
+                raise ValueError("Episode metadata missing dataset_to_index or length for return computation.")
+
+            success = ep.get("success", True)
+
+            return_bin_idx, return_continuous = calculate_return_bins_with_equal_width(
+                success=bool(success),
+                b=self.policy_cfg.reward_config.number_of_bins,
+                episode_end_idx=episode_end_idx,
+                reward_normalizer=self.policy_cfg.reward_config.reward_normalizer,
+                current_idx=abs_idx,
+                c_neg=self.policy_cfg.reward_config.C_neg,
+            )
+
+            #debug：加入guard以暂时修复return_bin_idex越界的问题
+            # b=201
+            # return_bin_idx = max(0, min(return_bin_idx, b - 1))
+
+            item["return_bin_idx"] = torch.tensor(return_bin_idx, dtype=torch.long)
+            item["return_continuous"] = torch.tensor(return_continuous, dtype=torch.float32)
+        
+            # print(f"[DEBUG] idx={idx}, episode={ep_idx}, return_bin_idx={return_bin_idx}, return_continuous={return_continuous}")
+
         return item
 
     def __repr__(self):

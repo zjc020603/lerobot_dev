@@ -99,6 +99,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
                 revision=cfg.dataset.revision,
                 video_backend=cfg.dataset.video_backend,
                 tolerance_s=cfg.tolerance_s,
+                policy_cfg=cfg.policy,
             )
         else:
             dataset = StreamingLeRobotDataset(
@@ -127,7 +128,18 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
 
     if cfg.dataset.use_imagenet_stats:
         for key in dataset.meta.camera_keys:
+            stats_key = key
+            if stats_key not in dataset.meta.stats:
+                if stats_key.startswith("observation.images."):
+                    stats_key = stats_key.replace("observation.images.", "", 1)
+                elif stats_key.startswith("observation.image."):
+                    stats_key = stats_key.replace("observation.image.", "", 1)
+
+            if stats_key not in dataset.meta.stats:
+                logging.warning("Skipping ImageNet stats for missing key: %s", key)
+                continue
+
             for stats_type, stats in IMAGENET_STATS.items():
-                dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
+                dataset.meta.stats[stats_key][stats_type] = torch.tensor(stats, dtype=torch.float32)
 
     return dataset

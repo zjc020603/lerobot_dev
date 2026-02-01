@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
@@ -79,6 +79,8 @@ class TokenizerProcessorStep(ObservationProcessorStep):
     padding_side: str = "right"
     padding: str = "max_length"
     truncation: bool = True
+    advantage_mode: Literal["ignore", "on", "use"] = "ignore"
+    advantage_threshold: float = 0.0
 
     # Internal tokenizer instance (not part of the config)
     input_tokenizer: Any = field(default=None, init=False, repr=False)
@@ -112,6 +114,7 @@ class TokenizerProcessorStep(ObservationProcessorStep):
                 "Either 'tokenizer' or 'tokenizer_name' must be provided. "
                 "Pass a tokenizer object directly or a tokenizer name to auto-load."
             )
+
 
     def get_task(self, transition: EnvTransition) -> list[str] | None:
         """
@@ -155,6 +158,29 @@ class TokenizerProcessorStep(ObservationProcessorStep):
         task = self.get_task(self.transition)
         if task is None:
             raise ValueError("Task cannot be None")
+
+        if self.advantage_mode != "ignore":
+            # PaliGemma prompt has to end with a new line
+            # NOTE: handled by dedicated *NewLineProcessor steps in policy pipelines.
+            # task = [t if t.endswith("\n") else f"{t}\n" for t in task]
+
+            if self.advantage_mode == "on":
+                task = [f"{t}Advantage: positive\n" for t in task]
+            elif self.advantage_mode == "use":
+                complementary_data = self.transition.get(TransitionKey.COMPLEMENTARY_DATA)
+                if complementary_data and "advantage" in complementary_data:
+                    advantage_values = complementary_data["advantage"]
+                    if isinstance(advantage_values, (int, float, bool)):
+                        advantage_values = [advantage_values] * len(task)
+                    elif isinstance(advantage_values, torch.Tensor):
+                        advantage_values = advantage_values.detach().cpu().tolist()
+
+                    if isinstance(advantage_values, list) and len(advantage_values) == len(task):
+                        for idx, value in enumerate(advantage_values):
+                            adv_text = (
+                                "positive" if float(value) >= self.advantage_threshold else "negative"
+                            )
+                            task[idx] = f"{task[idx]}Advantage: {adv_text}\n"
 
         # Tokenize the task (this will create CPU tensors)
         tokenized_prompt = self._tokenize_text(task)

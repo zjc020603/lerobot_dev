@@ -15,6 +15,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
@@ -94,6 +95,15 @@ class PI0Config(PreTrainedConfig):
     scheduler_decay_steps: int = 30_000
     scheduler_decay_lr: float = 2.5e-6
 
+
+    # 加入Advantage conditioning 
+    # When set to "use", the advantage values provided in the dataset will be used.
+    # When set to "ignore", no advantage conditioning will be applied.
+    # When set to "on", the advantage will always be True.
+    # This should only be "on" when training on expert demonstrations or interventions.
+    advantage_threshold: float = 0.0
+    advantage: Literal["ignore", "on", "use"] = "use"
+
     tokenizer_max_length: int = 48  # see openpi `__post_init__`
 
     def __post_init__(self):
@@ -113,6 +123,12 @@ class PI0Config(PreTrainedConfig):
 
         if self.dtype not in ["bfloat16", "float32"]:
             raise ValueError(f"Invalid dtype: {self.dtype}")
+
+        if self.advantage not in ["ignore", "on", "use"]:
+            raise ValueError(
+                f"Invalid advantage mode: {self.advantage}. Must be one of ['ignore', 'on', 'use']"
+            )
+
 
     def validate_features(self) -> None:
         """Validate and set up input/output features."""
