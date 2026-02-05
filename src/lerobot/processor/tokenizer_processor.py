@@ -182,6 +182,15 @@ class TokenizerProcessorStep(ObservationProcessorStep):
                             )
                             task[idx] = f"{task[idx]}Advantage: {adv_text}\n"
 
+        if not hasattr(self, "_logged_advantage"):
+            self._logged_advantage = True
+            logging.info(
+                "TokenizerProcessorStep advantage_mode=%s threshold=%s sample_task=%s",
+                self.advantage_mode,
+                self.advantage_threshold,
+                task[0] if task else None,
+            )
+
         # Tokenize the task (this will create CPU tensors)
         tokenized_prompt = self._tokenize_text(task)
 

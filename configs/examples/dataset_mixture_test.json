@@ -1,0 +1,41 @@
+{
+  "dataset_mixture": {
+    "datasets": [
+      {
+        "repo_id": "Jiacheng0603/handover_lerobot_dataset_208trajs_pi05_crop_task"
+      }
+    ],
+    "weights": [
+      1.0
+    ],
+    "action_freq": 30.0,
+    "image_resample_strategy": "nearest",
+     "vector_resample_strategy": "nearest"
+  },
+  "policy": {
+     "type": "pi05",
+     "push_to_hub": false,
+     "pretrained_path": "lerobot/pi05_base",
+     "advantage": "on",
+     "n_obs_steps": 1,
+     "chunk_size": 50,
+     "n_action_steps": 50,   
+     "max_state_dim": 32,
+     "max_action_dim": 32,
+     "normalization_mapping": {
+         "VISUAL": "IDENTITY",
+         "STATE": "MEAN_STD",
+         "ACTION": "MEAN_STD"
+     },
+     "tokenizer_max_length": 100
+    },
+
+  "steps": 60000,
+  "batch_size": 2, 
+  "num_workers": 2,
+  "save_freq": 5000,
+  "eval_freq": 0,
+  "wandb": {
+    "enable": false
+  }
+}

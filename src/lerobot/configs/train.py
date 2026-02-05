@@ -24,7 +24,7 @@ from huggingface_hub.errors import HfHubHTTPError
 
 from lerobot import envs
 from lerobot.configs import parser
-from lerobot.configs.default import DatasetConfig, EvalConfig, PeftConfig, WandBConfig
+from lerobot.configs.default import DatasetConfig, DatasetMixtureConfig, EvalConfig, PeftConfig, WandBConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.optim import OptimizerConfig
 from lerobot.optim.schedulers import LRSchedulerConfig
@@ -35,7 +35,8 @@ TRAIN_CONFIG_NAME = "train_config.json"
 
 @dataclass
 class TrainPipelineConfig(HubMixin):
-    dataset: DatasetConfig
+    dataset: DatasetConfig | None = None
+    dataset_mixture: DatasetMixtureConfig | None = None
     env: envs.EnvConfig | None = None
     policy: PreTrainedConfig | None = None
     # Set `dir` to where you would like to save all of the run outputs. If you run another training session
@@ -79,6 +80,8 @@ class TrainPipelineConfig(HubMixin):
     checkpoint_path: Path | None = field(init=False, default=None)
 
     def validate(self) -> None:
+        if (self.dataset is None) == (self.dataset_mixture is None):
+            raise ValueError("Exactly one of `dataset` or `dataset_mixture` must be set.")
         # HACK: We parse again the cli args here to get the pretrained paths if there was some.
         policy_path = parser.get_path_arg("policy")
         if policy_path:
@@ -126,7 +129,7 @@ class TrainPipelineConfig(HubMixin):
             train_dir = f"{now:%Y-%m-%d}/{now:%H-%M-%S}_{self.job_name}"
             self.output_dir = Path("outputs/train") / train_dir
 
-        if isinstance(self.dataset.repo_id, list):
+        if self.dataset is not None and isinstance(self.dataset.repo_id, list):
             raise NotImplementedError("LeRobotMultiDataset is not currently implemented.")
 
         if not self.use_policy_training_preset and (self.optimizer is None or self.scheduler is None):
@@ -142,11 +145,12 @@ class TrainPipelineConfig(HubMixin):
 
         if self.use_rabc and not self.rabc_progress_path:
             # Auto-detect from dataset path
-            repo_id = self.dataset.repo_id
-            if self.dataset.root:
-                self.rabc_progress_path = str(Path(self.dataset.root) / "sarm_progress.parquet")
-            else:
-                self.rabc_progress_path = f"hf://datasets/{repo_id}/sarm_progress.parquet"
+            if self.dataset is not None:
+                repo_id = self.dataset.repo_id
+                if self.dataset.root:
+                    self.rabc_progress_path = str(Path(self.dataset.root) / "sarm_progress.parquet")
+                else:
+                    self.rabc_progress_path = f"hf://datasets/{repo_id}/sarm_progress.parquet"
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:

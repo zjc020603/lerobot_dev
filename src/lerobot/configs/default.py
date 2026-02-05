@@ -38,6 +38,42 @@ class DatasetConfig:
 
 
 @dataclass
+class DatasetMixtureConfig:
+    """Configuration for a mixture of multiple datasets.
+
+    Args:
+        datasets: List of dataset configs to be used in the mixture.
+        weights: List of weights for each dataset in the mixture. Must be the
+            same length as `datasets`.
+        action_freq: Frequency at which actions are resampled, in Hz.
+        image_resample_strategy: Resample strategy for image features.
+        vector_resample_strategy: Resample strategy for non-image features.
+    """
+
+    datasets: list[DatasetConfig] = field(default_factory=list)
+    weights: list[float] = field(default_factory=list)
+    action_freq: float = 30.0
+    image_resample_strategy: str = "nearest"
+    vector_resample_strategy: str = "nearest"
+
+    def __post_init__(self) -> None:
+        if len(self.datasets) != len(self.weights):
+            raise ValueError("The length of `weights` must match the length of `datasets`.")
+        if self.action_freq <= 0:
+            raise ValueError(f"`action_freq` must be a positive number, got {self.action_freq}.")
+        if self.image_resample_strategy not in ["linear", "nearest"]:
+            raise ValueError(
+                "`image_resample_strategy` must be one of ['linear', 'nearest'], "
+                f"got {self.image_resample_strategy}."
+            )
+        if self.vector_resample_strategy not in ["linear", "nearest"]:
+            raise ValueError(
+                "`vector_resample_strategy` must be one of ['linear', 'nearest'], "
+                f"got {self.vector_resample_strategy}."
+            )
+
+
+@dataclass
 class WandBConfig:
     enable: bool = False
     # Set to true to disable saving an artifact despite training.save_checkpoint=True

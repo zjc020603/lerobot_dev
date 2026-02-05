@@ -28,6 +28,7 @@ from torch.optim import Optimizer
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets.factory import make_dataset
+from lerobot.datasets.dataset_mixture import WeightedDatasetMixture
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
 from lerobot.envs.factory import make_env, make_env_pre_post_processors
@@ -221,6 +222,17 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if not is_main_process:
         dataset = make_dataset(cfg)
 
+    #测试：使用使用到WeightedDatasetMixture
+    if is_main_process:
+        if isinstance(dataset, WeightedDatasetMixture):
+            logging.info(
+                "Using WeightedDatasetMixture with %d datasets and weights=%s",
+                len(dataset.datasets),
+                dataset.weights,
+            )
+        else:
+            logging.info("Using dataset type: %s", type(dataset).__name__)
+
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,
     # using the eval.py instead, with gym_dora environment and dora-rs.
@@ -266,6 +278,12 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                 "norm_map": policy.config.normalization_mapping,
             },
         }
+        #添加：对默认的advantage进行覆盖
+        if hasattr(cfg.policy, "advantage"):
+            processor_kwargs["preprocessor_overrides"]["tokenizer_processor"] = {
+                "advantage_mode": getattr(cfg.policy, "advantage"),
+                "advantage_threshold": getattr(cfg.policy, "advantage_threshold", 0.0),
+            }
         processor_kwargs["preprocessor_overrides"]["rename_observations_processor"] = {
             "rename_map": cfg.rename_map
         }
@@ -283,6 +301,14 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         **processor_kwargs,
         **postprocessor_kwargs,
     )
+
+    if hasattr(cfg.policy, "advantage"):
+        from lerobot.processor import TokenizerProcessorStep
+
+        for step in getattr(preprocessor, "steps", []):
+            if isinstance(step, TokenizerProcessorStep):
+                step.advantage_mode = getattr(cfg.policy, "advantage")
+                step.advantage_threshold = getattr(cfg.policy, "advantage_threshold", 0.0)
 
     if is_main_process:
         logging.info("Creating optimizer and scheduler")
@@ -337,7 +363,10 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
-    if hasattr(cfg.policy, "drop_n_last_frames"):
+    if isinstance(dataset, WeightedDatasetMixture):
+        shuffle = False
+        sampler = dataset.get_sampler()
+    elif hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
             dataset.meta.episodes["dataset_from_index"],
@@ -350,11 +379,12 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         shuffle = True
         sampler = None
 
+    is_streaming = cfg.dataset.streaming if cfg.dataset is not None else False
     dataloader = torch.utils.data.DataLoader(
         dataset,
         num_workers=cfg.num_workers,
         batch_size=cfg.batch_size,
-        shuffle=shuffle and not cfg.dataset.streaming,
+        shuffle=shuffle and not is_streaming,
         sampler=sampler,
         pin_memory=device.type == "cuda",
         drop_last=False,
