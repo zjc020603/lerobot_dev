@@ -156,6 +156,7 @@ class TokenizerProcessorStep(ObservationProcessorStep):
             The updated observation dictionary including token IDs and an attention mask.
         """
         task = self.get_task(self.transition)
+        # print("task:"   , task)
         if task is None:
             raise ValueError("Task cannot be None")
 
@@ -166,6 +167,7 @@ class TokenizerProcessorStep(ObservationProcessorStep):
 
             if self.advantage_mode == "on":
                 task = [f"{t}Advantage: positive\n" for t in task]
+                # print("modified task (on):", task)
             elif self.advantage_mode == "use":
                 complementary_data = self.transition.get(TransitionKey.COMPLEMENTARY_DATA)
                 if complementary_data and "advantage" in complementary_data:
@@ -182,14 +184,21 @@ class TokenizerProcessorStep(ObservationProcessorStep):
                             )
                             task[idx] = f"{task[idx]}Advantage: {adv_text}\n"
 
-        if not hasattr(self, "_logged_advantage"):
-            self._logged_advantage = True
-            logging.info(
-                "TokenizerProcessorStep advantage_mode=%s threshold=%s sample_task=%s",
-                self.advantage_mode,
-                self.advantage_threshold,
-                task[0] if task else None,
-            )
+        # if not hasattr(self, "_logged_advantage"):
+        #     self._logged_advantage = True
+        #     sample_task = task[0] if task else None
+        #     advantage_tail = None
+        #     if isinstance(sample_task, str):
+        #         marker = "Advantage: "
+        #         if marker in sample_task:
+        #             advantage_tail = sample_task.split(marker, 1)[-1].strip()
+        #     logging.info(
+        #         "TokenizerProcessorStep advantage_mode=%s threshold=%s sample_task=%s advantage_tail=%s",
+        #         self.advantage_mode,
+        #         self.advantage_threshold,
+        #         sample_task,
+        #         advantage_tail,
+        #     )
 
         # Tokenize the task (this will create CPU tensors)
         tokenized_prompt = self._tokenize_text(task)

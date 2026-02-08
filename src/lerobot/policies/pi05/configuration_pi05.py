@@ -53,6 +53,9 @@ class PI05Config(PreTrainedConfig):
     max_state_dim: int = 32
     max_action_dim: int = 32
 
+    # Whether to use state conditioning in denoising (adaRMS)
+    state_cond: bool = False
+
     # Flow matching parameters: see openpi `PI0Pytorch`
     num_inference_steps: int = 10
     time_sampling_beta_alpha: float = 1.5

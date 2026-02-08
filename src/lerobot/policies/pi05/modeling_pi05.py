@@ -48,6 +48,7 @@ from lerobot.utils.constants import (
     ACTION,
     OBS_LANGUAGE_ATTENTION_MASK,
     OBS_LANGUAGE_TOKENS,
+    OBS_STATE,
     OPENPI_ATTENTION_MASK_VALUE,
 )
 
@@ -563,6 +564,12 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
         self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
+        self.state_proj = nn.Linear(config.max_state_dim, action_expert_config.width)
+        self.state_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
+        self.state_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
+        nn.init.zeros_(self.state_mlp_out.weight)
+        nn.init.zeros_(self.state_mlp_out.bias)
+
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
 
@@ -674,8 +681,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         return embs, pad_masks, att_masks
 
-    def embed_suffix(self, noisy_actions, timestep):
-        """Embed noisy_actions, timestep to prepare for Expert Gemma processing."""
+    def embed_suffix(self, noisy_actions, timestep, state: torch.Tensor | None = None):
+        """Embed noisy_actions, timestep (and optional state) to prepare for Expert Gemma processing."""
         embs = []
         pad_masks = []
         att_masks = []
@@ -706,6 +713,25 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         action_time_emb = action_emb
         adarms_cond = time_emb
 
+        if state is not None:
+            if self.state_proj.weight.dtype == torch.float32:
+                state = state.to(torch.float32)
+
+            def state_proj_func(state):
+                return self.state_proj(state)
+
+            state_emb = self._apply_checkpoint(state_proj_func, state)
+
+            def state_mlp_func(state_emb):
+                x = self.state_mlp_in(state_emb)
+                x = F.silu(x)
+                x = self.state_mlp_out(x)
+                return F.silu(x)
+
+            state_emb = self._apply_checkpoint(state_mlp_func, state_emb)
+            adarms_cond = adarms_cond + state_emb
+            print("added state to adarms_cond")
+
         embs.append(action_time_emb)
         bsize, action_time_dim = action_time_emb.shape[:2]
         action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=timestep.device)
@@ -721,8 +747,10 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         return embs, pad_masks, att_masks, adarms_cond
 
-    def forward(self, images, img_masks, tokens, masks, actions, noise=None, time=None) -> Tensor:
+    def forward(self, images, img_masks, tokens, masks, state, actions, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss."""
+        if self.config.state_cond and state is None:
+            raise ValueError("state is required when state_cond is enabled")
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
 
@@ -734,7 +762,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         u_t = noise - actions
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time, state)
 
         if (
             self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
@@ -783,11 +811,14 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         img_masks,
         tokens,
         masks,
+        state=None,
         noise=None,
         num_steps=None,
         **kwargs: Unpack[ActionSelectKwargs],
     ) -> Tensor:
         """Do a full inference forward and compute the action."""
+        if self.config.state_cond and state is None:
+            raise ValueError("state is required when state_cond is enabled")
         if num_steps is None:
             num_steps = self.config.num_inference_steps
 
@@ -831,6 +862,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
                     past_key_values=past_key_values,
                     x_t=input_x_t,
                     timestep=current_timestep,
+                    state=state,
                 )
 
             if self._rtc_enabled():
@@ -862,9 +894,10 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         past_key_values,
         x_t,
         timestep,
+        state: torch.Tensor | None = None,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, timestep)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, timestep, state)
 
         suffix_len = suffix_pad_masks.shape[1]
         batch_size = prefix_pad_masks.shape[0]
@@ -1088,11 +1121,6 @@ class PI05Policy(PreTrainedPolicy):
                 new_key = key.replace("action_time_mlp_in.", "time_mlp_in.")
             elif key.startswith("action_time_mlp_out."):
                 new_key = key.replace("action_time_mlp_out.", "time_mlp_out.")
-            # Also handle state_proj which shouldn't exist in pi05
-            if key.startswith("state_proj."):
-                logging.warning(f"Skipping state_proj key in pi05 mode: {key}")
-                continue
-
             # Handle vision tower embedding layer potential differences
             if "patch_embedding" in key:
                 # Some checkpoints might have this, but current model expects different structure
@@ -1199,6 +1227,18 @@ class PI05Policy(PreTrainedPolicy):
         actions = pad_vector(batch[ACTION], self.config.max_action_dim)
         return actions
 
+    def prepare_state(self, batch):
+        """Pad state"""
+        if not self.config.state_cond:
+            return None
+        if OBS_STATE not in batch:
+            raise ValueError(
+                f"{OBS_STATE} is missing from the batch. "
+                "State is required for PI05 state-conditioned denoising."
+            )
+        state = pad_vector(batch[OBS_STATE], self.config.max_state_dim)
+        return state
+
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
         """Select a single action given environment observations."""
@@ -1224,9 +1264,10 @@ class PI05Policy(PreTrainedPolicy):
         # Prepare inputs
         images, img_masks = self._preprocess_images(batch)
         tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
+        state = self.prepare_state(batch)
 
-        # Sample actions using the model (pass through RTC kwargs, no separate state needed for PI05)
-        actions = self.model.sample_actions(images, img_masks, tokens, masks, **kwargs)
+        # Sample actions using the model (pass through RTC kwargs)
+        actions = self.model.sample_actions(images, img_masks, tokens, masks, state, **kwargs)
 
         # Unpad actions to actual action dimension
         original_action_dim = self.config.output_features[ACTION].shape[0]
@@ -1246,11 +1287,12 @@ class PI05Policy(PreTrainedPolicy):
         # Prepare inputs
         images, img_masks = self._preprocess_images(batch)
         tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
+        state = self.prepare_state(batch)
 
         actions = self.prepare_action(batch)
 
         # Compute loss (no separate state needed for PI05)
-        losses = self.model.forward(images, img_masks, tokens, masks, actions)
+        losses = self.model.forward(images, img_masks, tokens, masks, state, actions)
 
         # Truncate losses to actual action dimensions
         original_action_dim = self.config.output_features[ACTION].shape[0]
@@ -1274,7 +1316,7 @@ class PI05Policy(PreTrainedPolicy):
     def _get_default_peft_targets(self) -> dict[str, any]:
         """Return default PEFT target modules for PI0.5 fine-tuning."""
         common_projections = (
-            "state_proj|action_in_proj|action_out_proj|action_time_mlp_in|action_time_mlp_out"
+            "state_proj|state_mlp_in|state_mlp_out|action_in_proj|action_out_proj|action_time_mlp_in|action_time_mlp_out"
         )
         target_modules = rf"(.*\.gemma_expert\..*\.self_attn\.(q|v)_proj|model\.({common_projections}))"
         return {
